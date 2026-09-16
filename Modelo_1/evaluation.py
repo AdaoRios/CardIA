@@ -26,12 +26,33 @@ from models import build_logistic_regression_pipeline, build_random_forest_pipel
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 42
+ALL_FEATURES = [
+    "age",
+    "sex",
+    "cp",
+    "trestbps",
+    "chol",
+    "fbs",
+    "restecg",
+    "thalach",
+    "exang",
+    "oldpeak",
+    "slope",
+    "ca",
+    "thal",
+]
+FEATURE_SETS = {
+    "FULL": ALL_FEATURES,
+    "STRICT": ["age", "sex"],
+    "EXPANDED": ["age", "sex", "cp", "exang"],
+}
 
 
 @dataclass(frozen=True)
 class EvaluationResult:
     """Metricas e componentes da matriz de confusao de um modelo."""
 
+    feature_set: str
     name: str
     accuracy: float
     sensitivity: float
@@ -55,7 +76,13 @@ def remove_incomplete_cases(
     return X.loc[complete_cases].copy(), y.loc[complete_cases].copy(), excluded_count
 
 
-def evaluate_model(name: str, pipeline: Pipeline, X_test: pd.DataFrame, y_test: pd.Series) -> EvaluationResult:
+def evaluate_model(
+    feature_set: str,
+    name: str,
+    pipeline: Pipeline,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+) -> EvaluationResult:
     """Calcula as metricas de avaliacao final para uma pipeline ja treinada."""
 
     probabilities = pipeline.predict_proba(X_test)
@@ -68,6 +95,7 @@ def evaluate_model(name: str, pipeline: Pipeline, X_test: pd.DataFrame, y_test: 
     specificity = tn / (tn + fp) if (tn + fp) else 0.0
 
     return EvaluationResult(
+        feature_set=feature_set,
         name=name,
         accuracy=accuracy_score(y_test, predictions),
         sensitivity=recall_score(y_test, predictions),
@@ -98,56 +126,73 @@ def print_result(result: EvaluationResult) -> None:
     print(f"TN={result.tn}, FP={result.fp}, FN={result.fn}, TP={result.tp}")
 
 
-def run_experiment() -> tuple[EvaluationResult, EvaluationResult]:
-    """Executa split estratificado, complete-case analysis, treino e avaliacao.
-
-    O split ocorre no dataset original antes de qualquer transformacao aprendida.
-    Em seguida, casos incompletos sao excluidos de cada particicao, sem imputacao.
-    Assim, scaler, encoder e modelos sao ajustados exclusivamente no treino.
-    """
+def run_experiment() -> list[EvaluationResult]:
+    """Executa os modelos com os mesmos complete cases e o mesmo split."""
 
     X, y = load_heart_disease()
-    X_train_raw, X_test_raw, y_train_raw, y_test_raw = train_test_split(
-        X, y, test_size=TEST_SIZE, stratify=y, random_state=RANDOM_STATE
+    X_complete, y_complete, excluded_count = remove_incomplete_cases(X[ALL_FEATURES], y)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_complete,
+        y_complete,
+        test_size=TEST_SIZE,
+        stratify=y_complete,
+        random_state=RANDOM_STATE,
     )
-    X_train, y_train, excluded_train = remove_incomplete_cases(X_train_raw, y_train_raw)
-    X_test, y_test, excluded_test = remove_incomplete_cases(X_test_raw, y_test_raw)
 
     print(f"{'=' * 50}\nDATASET\n{'=' * 50}")
     print(f"Total de observacoes: {len(X)}")
-    print(f"Observacoes completas utilizadas: {len(X_train) + len(X_test)}")
-    print(f"Observacoes excluidas por missing: {excluded_train + excluded_test}")
+    print(f"Observacoes completas utilizadas: {len(X_complete)}")
+    print(f"Observacoes excluidas por missing: {excluded_count}")
     print(f"Treino (complete cases): {len(X_train)}")
     print(f"Teste (complete cases): {len(X_test)}")
 
-    logistic_pipeline = build_logistic_regression_pipeline()
-    random_forest_pipeline = build_random_forest_pipeline()
-    logistic_pipeline.fit(X_train, y_train)
-    random_forest_pipeline.fit(X_train, y_train)
+    results = []
+    reference_train_indices = X_train.index
+    reference_test_indices = X_test.index
+    for feature_set_name, selected_features in FEATURE_SETS.items():
+        assert X_train.index.equals(reference_train_indices)
+        assert X_test.index.equals(reference_test_indices)
+        X_train_selected = X_train[selected_features]
+        X_test_selected = X_test[selected_features]
+        pipelines = [
+            (
+                "Logistic Regression",
+                build_logistic_regression_pipeline(selected_features),
+            ),
+            ("Random Forest", build_random_forest_pipeline(selected_features)),
+        ]
 
-    logistic_result = evaluate_model("Logistic Regression", logistic_pipeline, X_test, y_test)
-    forest_result = evaluate_model("Random Forest", random_forest_pipeline, X_test, y_test)
-    print_result(logistic_result)
-    print_result(forest_result)
+        for model_name, pipeline in pipelines:
+            pipeline.fit(X_train_selected, y_train)
+            result = evaluate_model(
+                feature_set_name,
+                model_name,
+                pipeline,
+                X_test_selected,
+                y_test,
+            )
+            results.append(result)
+            print_result(result)
 
     comparison = pd.DataFrame(
         [
             {
-                "Modelo": result.name,
+                "Feature Set": result.feature_set,
+                "Model": result.name,
                 "Accuracy": result.accuracy,
                 "Sensitivity/Recall": result.sensitivity,
                 "Specificity": result.specificity,
                 "Precision": result.precision,
-                "F1-score": result.f1,
+                "F1": result.f1,
                 "ROC-AUC": result.roc_auc,
             }
-            for result in (logistic_result, forest_result)
+            for result in results
         ]
     )
     print(f"\n{'=' * 50}\nCOMPARACAO\n{'=' * 50}")
     print(comparison.to_string(index=False, float_format=lambda value: f"{value:.4f}"))
 
-    return logistic_result, forest_result
+    return results
 
 
 if __name__ == "__main__":
